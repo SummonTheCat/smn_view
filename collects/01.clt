@@ -1,0 +1,1040 @@
+=== ./src/io\io_file.rs ===
+use std::{fs::File, io::Read, path::Path};
+
+// Read to bytes or error
+pub fn file_read_bytes(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+// Read to string or error
+pub fn file_read_string(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = File::open(path)?;
+    let mut buffer = String::new();
+    file.read_to_string(&mut buffer)?;
+    Ok(buffer)
+}
+
+=== ./src/io\io_path.rs ===
+use std::{env, path::{Path, PathBuf}};
+
+pub fn path_get_root() -> PathBuf {
+    // Get the environment SMNVIEW_ROOT
+    let env_root = env::var("SMNVIEW_ROOT").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(env_root)
+}
+
+pub fn get_extension(path: &PathBuf) -> Option<&str> {
+    path.extension().and_then(|ext| ext.to_str())
+}
+
+=== ./src/io\mod.rs ===
+#[allow(unused)]
+pub mod io_path;
+#[allow(unused)]
+pub mod io_file;
+
+=== ./src/lib.rs ===
+pub mod server;
+pub mod util;
+pub mod window;
+pub mod io;
+
+=== ./src/main.rs ===
+// src/main.rs
+
+mod plugins;
+mod server;
+mod util;
+mod window;
+mod io;
+
+use plugins::{plugin_statics::PluginStatics, plugin_ui::PluginUI};
+use server::{plugin::plugin_manager::PluginManager, server_core::start_server};
+use std::net::SocketAddr;
+use util::logging::{log_line, log_line_header, logln, Color};
+use window::{structs::struct_windowconfig::WindowConfig, window_core::start_window};
+
+#[tokio::main]
+async fn main() -> wry::Result<()> {
+    let addr: SocketAddr = ([127, 0, 0, 1], 3030).into();
+    let url = format!("http://{}/", addr);
+
+    // Create the PluginManager and apply plugins
+    logln("");
+    log_line_header("Plugin Manager", Color::Cyan, 30);
+    let mut plugin_manager = PluginManager::new();
+    plugin_manager
+        .apply_plugin(Box::new(PluginUI::new()))
+        .expect("Failed to apply plugin");
+
+    plugin_manager
+        .apply_plugin(Box::new(PluginStatics::new("statics".to_string())))
+        .expect("Failed to apply plugin");
+
+    log_line(Color::Cyan, 30);
+    logln("");
+
+    // Start the server with the given address and PluginManager
+    log_line_header("Server", Color::Cyan, 30);
+    let mut server = start_server(addr, plugin_manager);
+    server.await_ready();
+
+    // Start the UI with the given URL
+    // Once the window closes, trigger server shutdown
+    let window_config = WindowConfig::default().set_title("SmnView").set_url(&url);
+
+    start_window(window_config, || {
+        server.shutdown();
+    })?;
+
+    server.await_shutdown();
+    log_line(Color::Cyan, 30);
+
+    Ok(())
+}
+
+=== ./src/plugins\mod.rs ===
+pub mod plugin_ui;
+pub mod plugin_statics;
+
+=== ./src/plugins\plugin_statics\mod.rs ===
+use std::io::{Result, Write};
+use std::net::TcpStream;
+
+use crate::server::plugin::plugin_base::Plugin;
+use crate::server::structs::structs_mime::Mime;
+use crate::server::structs::structs_request::Request;
+use crate::server::structs::structs_response::Response;
+use crate::util::logging::{logln, Color};
+
+pub struct PluginStatics{
+    pub path_statics: String,
+}
+
+impl PluginStatics {
+    /// Creates a new instance of `PluginStatics`.
+    pub fn new(path_statics: String) -> Self {
+        Self {
+            path_statics,
+        }
+    }
+}
+
+impl Plugin for PluginStatics {
+    fn init(&mut self) -> Result<()> {
+        logln(&format!("{} {}", Color::BrightBlack.paint("Plugin initialized: "), Color::BrightBlue.paint("PluginStatics")));
+        Ok(())
+    }
+
+    fn catch(&self, request: &Request) -> bool {
+        request.path == "/" && request.method == "GET" 
+    }
+
+    fn serve(&self, stream: &mut TcpStream, request: &Request) -> Result<()> {
+        // Response: Path: {path},\n Method: {method}
+        let msg = format!("Path: {},\nMethod: {} Static: {}", request.path, request.method, self.path_statics);
+        let body = msg.as_bytes().to_vec();
+
+        let mime = Mime::TextPlain;
+
+        let mut response = Response::response_ok(body, mime);
+        response.body = msg.as_bytes().to_vec();
+
+        stream.write_all(&response.to_bytes())?;
+        stream.flush()?;
+        Ok(())
+    }
+}
+
+=== ./src/plugins\plugin_ui\mod.rs ===
+use std::io::{Result, Write};
+use std::net::TcpStream;
+
+use crate::io::io_file::file_read_bytes;
+use crate::io::io_path::{get_extension, path_get_root};
+use crate::server::plugin::plugin_base::Plugin;
+use crate::server::structs::structs_header::StatusCode;
+use crate::server::structs::structs_mime::Mime;
+use crate::server::structs::structs_request::Request;
+use crate::server::structs::structs_response::Response;
+use crate::util::logging::{logln, Color};
+
+pub struct PluginUI;
+
+impl PluginUI {
+    /// Creates a new instance of `PluginUI`.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Plugin for PluginUI {
+    fn init(&mut self) -> Result<()> {
+        logln(&format!(
+            "{} {}",
+            Color::BrightBlack.paint("Plugin initialized: "),
+            Color::BrightBlue.paint("PluginUI")
+        ));
+        Ok(())
+    }
+
+    fn catch(&self, request: &Request) -> bool {
+        request.path == "/" && request.method == "GET"
+    }
+
+    fn serve(&self, stream: &mut TcpStream, _request: &Request) -> Result<()> {
+        let path_landing = path_get_root().join("statics/index.html");
+
+        logln(&format!(
+            "{} {}",
+            Color::BrightBlack.paint("Serving: "),
+            Color::BrightBlue.paint(path_landing.to_str().unwrap())
+        ));
+
+        let content = match file_read_bytes(path_landing.as_path()) {
+            Ok(content) => content,
+            Err(_) => {
+                let response = Response::response_error("File not found".to_owned(), StatusCode::NotFound);
+                stream.write_all(&response.to_bytes())?;
+                return Ok(());
+            }
+        };
+
+        let extension = get_extension(&path_landing).unwrap_or("html");
+        let mime = Mime::from_extension(extension);
+
+        let response = Response::response_ok(content, mime);
+
+        stream.write_all(&response.to_bytes())?;
+        stream.flush()?;
+        Ok(())
+    }
+}
+
+=== ./src/server\mod.rs ===
+pub mod structs;
+pub mod plugin;
+
+pub mod server_core;
+
+=== ./src/server\plugin\mod.rs ===
+pub mod plugin_base;
+pub mod plugin_manager;
+
+=== ./src/server\plugin\plugin_base.rs ===
+// src/server/plugin/plugin_base.rs
+
+use std::io::Result;
+use std::net::TcpStream;
+
+use crate::server::structs::structs_request::Request;
+
+/// The `Plugin` trait defines the necessary methods that all plugins must implement.
+pub trait Plugin: Send + Sync + 'static {
+    /// Initializes the plugin. Called when the plugin is added to the server.
+    fn init(&mut self) -> Result<()>;
+
+    /// Determines if the plugin should handle the current request.
+    /// Returns `true` if the plugin will handle the request.
+    fn catch(&self, request: &Request) -> bool;
+
+    /// Serves the request by writing the response to the stream.
+    fn serve(&self, stream: &mut TcpStream, request: &Request) -> Result<()>;
+}
+
+=== ./src/server\plugin\plugin_manager.rs ===
+// src/server/plugin/plugin_manager.rs
+
+
+
+use std::io::Result;
+use std::sync::Arc;
+
+use crate::server::structs::structs_request::Request;
+
+use super::plugin_base::Plugin;
+
+/// Manages a collection of plugins.
+pub struct PluginManager {
+    plugins: Vec<Arc<dyn Plugin + Send + Sync>>,
+}
+
+impl PluginManager {
+    /// Creates a new `PluginManager` instance.
+    pub fn new() -> Self {
+        Self {
+            plugins: Vec::new(),
+        }
+    }
+
+    /// Applies a new plugin to the manager.
+    pub fn apply_plugin(&mut self, mut plugin: Box<dyn Plugin + Send + Sync>) -> Result<()> {
+        plugin.init()?;
+
+        // Convert `Box<dyn Plugin + Send + Sync>` into `Arc<dyn Plugin + Send + Sync>`
+        let arc_plugin: Arc<dyn Plugin + Send + Sync> = Arc::from(plugin);
+
+        self.plugins.push(arc_plugin);
+        Ok(())
+    }
+
+    /// Finds a plugin that can handle the given request.
+    pub fn find_plugin(&self, request: &Request) -> Option<Arc<dyn Plugin + Send + Sync>> {
+        for plugin in &self.plugins {
+            if plugin.catch(request) {
+                return Some(Arc::clone(plugin));
+            }
+        }
+        None
+    }
+}
+
+=== ./src/server\server_core.rs ===
+// src/server/server_core.rs
+
+use std::{net::SocketAddr, thread};
+use tokio::{net::TcpListener, io::{AsyncReadExt, AsyncWriteExt}, sync::oneshot};
+use crate::{server::structs::{structs_header::StatusCode, structs_request::Request, structs_response::Response}, util::logging::{logln, logln_color, Color}};
+use std::sync::Arc;
+
+use super::plugin::plugin_manager::PluginManager;
+
+/// Represents the server.
+pub struct Server {
+    pub ready_rx: oneshot::Receiver<()>,
+    pub handle: Option<thread::JoinHandle<()>>,
+    pub _shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+impl Server {
+    /// Sends a shutdown signal to the server.
+    pub fn shutdown(&mut self) {
+        if let Some(tx) = self._shutdown_tx.take() {
+            let _ = tx.send(());
+        } else {
+            logln("Shutdown already triggered or not available.");
+        }
+    }
+
+    /// Waits for the server to shut down.
+    pub fn await_shutdown(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            if let Err(err) = handle.join() {
+                logln(&format!("Server thread panicked: {:?}", err));
+            } else {
+                logln_color("[Ended: Server]", Color::Green);
+            }
+        } else {
+            logln("Server already shut down or join called multiple times.");
+        }
+    }
+
+    /// Waits until the server is ready to accept connections.
+    pub fn await_ready(&mut self) {
+        if let Ok(_) = self.ready_rx.try_recv() {
+            // Server is ready
+        }
+    }
+}
+
+/// Starts the server on the specified address with the provided `PluginManager`.
+pub fn start_server(addr: SocketAddr, plugin_manager: PluginManager) -> Server {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    // Move `PluginManager` into the server thread
+    let server_handle = thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+        rt.block_on(async move {
+            let listener = TcpListener::bind(addr).await.expect("Failed to bind");
+
+            logln_color("[Started: Server]", Color::Green);
+            // Print the server address and http:// URL
+            logln(&format!("{} {}", Color::BrightBlack.paint("Server listening on:"), Color::Blue.paint(&format!("http://{}", addr))));
+            let _ = ready_tx.send(());
+
+            // Wrap `PluginManager` in an `Arc` for shared ownership across tasks
+            let plugin_manager = Arc::new(plugin_manager);
+
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        // Shutdown signal received
+                        break;
+                    }
+                    accept_result = listener.accept() => {
+                        match accept_result {
+                            Ok((mut stream, _peer)) => {
+                                // Clone the `PluginManager` Arc for the task
+                                let plugin_manager = Arc::clone(&plugin_manager);
+                                tokio::spawn(async move {
+                                    // Read the request
+                                    let mut buf = [0u8; 1024];
+                                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                                    if n == 0 {
+                                        // Connection closed
+                                        return;
+                                    }
+                                    match Request::from_bytes(&buf[..n]) {
+                                        Ok(request) => {
+                                            // Find a plugin to handle the request
+                                            if let Some(plugin) = plugin_manager.find_plugin(&request) {
+                                                // Convert `tokio::net::TcpStream` to `std::net::TcpStream`
+                                                let std_stream = match stream.into_std() {
+                                                    Ok(s) => s,
+                                                    Err(e) => {
+                                                        logln(&format!("Failed to convert stream: {}", e));
+                                                        return;
+                                                    }
+                                                };
+                                                let mut std_stream = std_stream;
+                                                if let Err(e) = plugin.serve(&mut std_stream, &request) {
+                                                    logln(&format!("Plugin serve error: {}", e));
+                                                }
+                                            } else {
+                                                // No plugin found, respond with No Content
+                                                let response = Response::response_error("No Content".to_owned(), StatusCode::NotFound).to_bytes();
+                                                let _ = stream.write_all(&response).await;
+                                                let _ = stream.flush().await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            logln(&format!("Failed to parse request: {}", e));
+                                            // Invalid request, respond with Bad Request
+                                            let response = Response::response_error("Bad Request".to_owned(), StatusCode::BadRequest).to_bytes();
+                                            let _ = stream.write_all(&response).await;
+                                            let _ = stream.flush().await;
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                logln(&format!("Failed to accept connection: {}", e));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    });
+
+    Server {
+        ready_rx,
+        handle: Some(server_handle),
+        _shutdown_tx: Some(shutdown_tx),
+    }
+}
+
+=== ./src/server\structs\mod.rs ===
+#[allow(unused)]
+pub mod structs_request;
+#[allow(unused)]
+pub mod structs_response;
+#[allow(unused)]
+pub mod structs_header;
+#[allow(unused)]
+pub mod structs_mime;
+
+=== ./src/server\structs\structs_header.rs ===
+pub enum StatusCode {
+    Ok = 200,
+    BadRequest = 400,
+    NotFound = 404,
+    InternalServerError = 500,
+}
+
+impl StatusCode {
+    pub fn to_msg(&self) -> &str {
+        match self {
+            StatusCode::Ok => "OK",
+            StatusCode::BadRequest => "Bad Request",
+            StatusCode::NotFound => "Not Found",
+            StatusCode::InternalServerError => "Internal Server Error",
+        }
+    }
+
+    pub fn to_code(&self) -> u16 {
+        match self {
+            StatusCode::Ok => 200,
+            StatusCode::BadRequest => 400,
+            StatusCode::NotFound => 404,
+            StatusCode::InternalServerError => 500,
+        }
+    }
+}
+
+=== ./src/server\structs\structs_mime.rs ===
+pub enum Mime {
+    TextPlain,
+    TextHtml,
+    ApplicationJson,
+    CSS,
+    JavaScript,
+}
+
+impl Mime {
+    pub fn to_string(&self) -> &str {
+        match self {
+            Mime::TextPlain => "text/plain",
+            Mime::TextHtml => "text/html",
+            Mime::ApplicationJson => "application/json",
+            Mime::CSS => "text/css",
+            Mime::JavaScript => "application/javascript",
+        }
+    }
+
+    pub fn from_string(mime: &str) -> Self {
+        match mime {
+            "text/plain" => Mime::TextPlain,
+            "text/html" => Mime::TextHtml,
+            "application/json" => Mime::ApplicationJson,
+            "text/css" => Mime::CSS,
+            "application/javascript" => Mime::JavaScript,
+            _ => Mime::TextPlain,
+        }
+    }
+
+    pub fn from_extension(extension: &str) -> Self {
+        match extension {
+            "txt" => Mime::TextPlain,
+            "html" => Mime::TextHtml,
+            "json" => Mime::ApplicationJson,
+            "css" => Mime::CSS,
+            "js" => Mime::JavaScript,
+            _ => Mime::TextPlain,
+        }
+    }
+}
+
+=== ./src/server\structs\structs_request.rs ===
+// src/server/structs/structs_http.rs
+
+use crate::util::logging::logln;
+use std::collections::HashMap;
+
+/// Represents an HTTP request with minimal parsing.
+#[derive(Default)]
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub header_fields: HashMap<String, String>, // Explicit type annotations
+    pub body: Vec<u8>, // New field to store the request body
+}
+
+/// Custom error type for Request operations.
+#[derive(Debug)]
+pub enum RequestError {
+    HeaderNotFound(String),
+    InvalidRequest(String),
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestError::HeaderNotFound(header) => write!(f, "Header '{}' not found", header),
+            RequestError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for RequestError {}
+
+impl Request {
+    /// Parses a raw HTTP request string and returns a `Request` instance.
+    pub fn from_string(request: &str) -> Result<Self, RequestError> {
+        let request_bytes = request.as_bytes();
+        Self::from_bytes(request_bytes)
+    }
+
+    /// Parses a raw HTTP request from bytes and returns a `Request` instance.
+    pub fn from_bytes(request: &[u8]) -> Result<Self, RequestError> {
+        let mut lines = request.split(|&b| b == b'\r' || b == b'\n');
+
+        // Parse request line
+        let request_line = lines
+            .next()
+            .ok_or_else(|| RequestError::InvalidRequest("Empty request".to_string()))?;
+        let request_line_str = String::from_utf8_lossy(request_line);
+        let mut parts = request_line_str.split_whitespace();
+
+        let method = parts
+            .next()
+            .ok_or_else(|| RequestError::InvalidRequest("Missing HTTP method".to_string()))?
+            .to_string();
+        let path = parts
+            .next()
+            .ok_or_else(|| RequestError::InvalidRequest("Missing request path".to_string()))?
+            .to_string();
+        // Optionally, parse HTTP version if needed
+        // let _version = parts.next().ok_or_else(|| RequestError::InvalidRequest("Missing HTTP version".to_string()))?.to_string();
+
+        let mut header_fields: HashMap<String, String> = HashMap::new();
+        let mut current_header = None;
+
+        // Parse headers
+        for line in &mut lines {
+            if line.is_empty() {
+                break; // End of headers
+            }
+
+            let line_str = String::from_utf8_lossy(line);
+            if line_str.starts_with(' ') || line_str.starts_with('\t') {
+                // Continuation of the previous header
+                if let Some(ref header_name) = current_header {
+                    if let Some(header_value) = header_fields.get_mut(header_name) {
+                        header_value.push(' ');
+                        header_value.push_str(line_str.trim());
+                    }
+                }
+            } else {
+                if let Some((key, value)) = line_str.split_once(':') {
+                    let key = key.trim().to_lowercase(); // Normalize to lowercase for case-insensitive matching
+                    let value = value.trim().to_string();
+                    header_fields.insert(key.clone(), value);
+                    current_header = Some(key);
+                } else {
+                    return Err(RequestError::InvalidRequest(format!(
+                        "Invalid header line: {}",
+                        line_str
+                    )));
+                }
+            }
+        }
+
+        // Parse body based on Content-Length
+        let body = if let Some(content_length_str) = header_fields.get("content-length") {
+            let content_length: usize = content_length_str.parse().map_err(|_| {
+                RequestError::InvalidRequest("Invalid Content-Length value".to_string())
+            })?;
+
+            let mut body = Vec::with_capacity(content_length);
+            for _ in 0..content_length {
+                if let Some(&byte) = request.get(lines.clone().count()) {
+                    body.push(byte);
+                }
+            }
+
+            // Since we've already split the request into lines, we'll reconstruct the body.
+            // Alternatively, you can handle the body differently based on your server's implementation.
+            // For simplicity, we'll assume the body starts after the first empty line.
+
+            let body_start = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|pos| pos + 4)
+                .unwrap_or(request.len());
+
+            request[body_start..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
+            method,
+            path,
+            header_fields,
+            body,
+        })
+    }
+
+    /// Retrieves the value of a specific header.
+    ///
+    /// # Arguments
+    ///
+    /// * `header_name` - The name of the header to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&str)` containing the header value if found.
+    /// * `Err(RequestError)` with an error message if the header is not found.
+    pub fn get_header_value<'a>(&'a self, header_name: &str) -> Result<&'a str, RequestError> {
+        self.header_fields
+            .get(&header_name.to_lowercase())
+            .map(|value| value.as_str())
+            .ok_or_else(|| RequestError::HeaderNotFound(header_name.to_string()))
+    }
+
+    /// Retrieves the value of a specific header or returns a default value if not found.
+    ///
+    /// # Arguments
+    ///
+    /// * `header_name` - The name of the header to retrieve.
+    /// * `default` - The default value to return if the header is not found.
+    ///
+    /// # Returns
+    ///
+    /// * `&str` containing the header value if found, otherwise the default value.
+    pub fn get_header_value_or_default<'a>(
+        &'a self,
+        header_name: &str,
+        default: &'a str,
+    ) -> &'a str {
+        self.header_fields
+            .get(&header_name.to_lowercase())
+            .map(|value| value.as_str())
+            .unwrap_or(default)
+    }
+
+    /// Retrieves the request body as a byte slice.
+    ///
+    /// # Returns
+    ///
+    /// * `&[u8]` containing the request body.
+    pub fn get_body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Retrieves the request body as a string, if valid UTF-8.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&str)` containing the body as a string.
+    /// * `Err(std::str::Utf8Error)` if the body is not valid UTF-8.
+    pub fn get_body_as_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.body)
+    }
+}
+
+// Debug implementation for Request
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("header_fields", &self.header_fields)
+            .field("body", &format!("{:?}", self.body))
+            .finish()
+    }
+}
+
+=== ./src/server\structs\structs_response.rs ===
+// src/server/structs/structs_response.rs
+
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::util::logging::logln;
+
+use super::structs_header::StatusCode;
+use super::structs_mime::Mime;
+
+/// Represents an HTTP response.
+#[derive(Default, Debug)]
+pub struct Response {
+    pub status_code: u16,
+    pub status_message: String,
+    pub header_fields: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+/// Custom error type for Response operations.
+#[derive(Debug)]
+pub enum ResponseError {
+    InvalidStatusCode(u16),
+    InvalidHeader(String),
+}
+
+impl fmt::Display for ResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResponseError::InvalidStatusCode(code) => write!(f, "Invalid status code: {}", code),
+            ResponseError::InvalidHeader(header) => write!(f, "Invalid header: {}", header),
+        }
+    }
+}
+
+impl std::error::Error for ResponseError {}
+
+impl Response {
+    /// Creates a new `Response` with the given status code and message.
+    pub fn new(status_code: u16, status_message: &str) -> Self {
+        Self {
+            status_code,
+            status_message: status_message.to_string(),
+            header_fields: HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// Sets a header field, replacing any existing value.
+    
+    pub fn set_header(&mut self, key: &str, value: &str) {
+        self.header_fields.insert(key.to_string(), value.to_string());
+    }
+
+    /// Adds a header field. If the header already exists, appends the value separated by a comma.
+   
+    pub fn add_header(&mut self, key: &str, value: &str) {
+        let key_lower = key.to_lowercase();
+        self.header_fields
+            .entry(key_lower)
+            .and_modify(|existing| {
+                existing.push_str(", ");
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    }
+
+    /// Sets the body of the response with raw bytes.
+    pub fn set_body(&mut self, body: Vec<u8>) {
+        self.body = body;
+    }
+
+    /// Sets the body of the response from a string slice.
+    pub fn set_body_from_str(&mut self, body: &str) {
+        self.body = body.as_bytes().to_vec();
+    }
+
+    /// Serializes the `Response` into a byte vector suitable for sending over a network.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut response = Vec::new();
+
+        // Status line
+        let status_line = format!("HTTP/1.1 {} {}\r\n", self.status_code, self.status_message);
+        response.extend_from_slice(status_line.as_bytes());
+
+        // Headers
+        for (key, value) in &self.header_fields {
+            let header_line = format!("{}: {}\r\n", key, value);
+            response.extend_from_slice(header_line.as_bytes());
+        }
+
+        // Blank line to indicate end of headers
+        response.extend_from_slice(b"\r\n");
+
+        // Body
+        response.extend_from_slice(&self.body);
+
+        response
+    }
+}
+
+
+impl Response {
+    // Response presets
+    pub fn response_ok(body: Vec<u8>, mime: Mime) -> Self {
+        let code = StatusCode::Ok.to_code();
+        let msg = StatusCode::Ok.to_msg();
+        let mut response = Self::new(code, msg);
+        response.set_header("Content-Type", mime.to_string());
+
+        response.set_body(body);
+        response
+    }
+
+    pub fn response_error (error: String, code: StatusCode) -> Self {
+        let mut response = Self::new(code.to_code(), code.to_msg());
+        response.set_header("Content-Type", Mime::TextPlain.to_string());
+
+        response.set_body(error.to_string().as_bytes().to_vec());
+        response
+    }
+}
+
+=== ./src/util\logging\logging_color.rs ===
+
+/// Enum representing supported text colors.
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    Reset, // Resets the color to default
+}
+
+impl Color {
+    /// Returns the ANSI escape code corresponding to the color.
+    pub fn to_ansi_code(&self) -> &'static str {
+        match self {
+            Color::Black => "\x1b[30m",
+            Color::Red => "\x1b[31m",
+            Color::Green => "\x1b[32m",
+            Color::Yellow => "\x1b[33m",
+            Color::Blue => "\x1b[34m",
+            Color::Magenta => "\x1b[35m",
+            Color::Cyan => "\x1b[36m",
+            Color::White => "\x1b[37m",
+            Color::BrightBlack => "\x1b[90m",
+            Color::BrightRed => "\x1b[91m",
+            Color::BrightGreen => "\x1b[92m",
+            Color::BrightYellow => "\x1b[93m",
+            Color::BrightBlue => "\x1b[94m",
+            Color::BrightMagenta => "\x1b[95m",
+            Color::BrightCyan => "\x1b[96m",
+            Color::BrightWhite => "\x1b[97m",
+            Color::Reset => "\x1b[0m",
+        }
+    }
+
+    pub fn paint(&self, msg: &str) -> String {
+        format!("{}{}{}", self.to_ansi_code(), msg, RESET_COLOR)
+    }
+}
+
+/// Utility function to reset terminal color.
+pub const RESET_COLOR: &str = "\x1b[0m";
+
+=== ./src/util\logging\logging_core.rs ===
+use super::Color;
+
+
+pub fn log(msg: &str) {
+    print!("{}", msg);
+}
+
+pub fn logln(msg: &str) {
+    println!("{}", msg);
+}
+
+pub fn log_color(msg: &str, color: Color) {
+    print!("{}", color.paint(msg));
+}
+
+pub fn logln_color(msg: &str, color: Color) {
+    println!("{}", color.paint(msg));
+}
+
+pub fn log_line_header(msg: &str, color: Color, line_length: usize) {
+    let header = format!("{:-^1$}", msg, line_length);
+    logln_color(&header, color);
+}
+
+pub fn log_line(color: Color, line_length: usize) {
+    let line = format!("{:-^1$}", "", line_length);
+    log_color(&line, color);
+    logln("");
+}
+
+=== ./src/util\logging\mod.rs ===
+mod logging_core;
+#[allow(unused)]
+mod logging_color;
+
+#[allow(unused)]
+pub use logging_core::log;
+#[allow(unused)]
+pub use logging_core::logln;
+#[allow(unused)]
+pub use logging_core::log_color;
+#[allow(unused)]
+pub use logging_core::logln_color;
+#[allow(unused)]
+pub use logging_core::log_line_header;
+#[allow(unused)]
+pub use logging_core::log_line;
+
+#[allow(unused)]
+pub use logging_color::Color;
+
+=== ./src/util\mod.rs ===
+pub mod logging;
+
+=== ./src/window\mod.rs ===
+pub mod window_core;
+pub mod structs;
+
+=== ./src/window\structs\mod.rs ===
+#![allow(unused)]
+pub mod struct_windowconfig;
+
+=== ./src/window\structs\struct_windowconfig.rs ===
+use wry::application::dpi::LogicalSize;
+
+pub struct WindowConfig {
+    pub title: String,
+    pub size: LogicalSize<f64>,
+    pub url: String,
+}
+
+impl WindowConfig {
+    pub fn default() -> Self {
+        Self {
+            title: "SmnView".to_string(),
+            size: LogicalSize::new(800.0, 600.0),
+            url: "http://127.0.0.1:3030/".to_string(),
+        }
+    }
+
+    pub fn set_title(mut self, title: &str) -> Self {
+        self.title = title.to_string();
+        self
+    }
+
+    pub fn set_size(mut self, width: f64, height: f64) -> Self {
+        self.size = LogicalSize::new(width, height);
+        self
+    }
+
+    pub fn set_url(mut self, url: &str) -> Self {
+        self.url = url.to_string();
+        self
+    }
+}
+
+
+=== ./src/window\window_core.rs ===
+use wry::{
+    application::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        platform::run_return::EventLoopExtRunReturn,
+        window::WindowBuilder,
+    },
+    webview::WebViewBuilder,
+};
+
+use crate::util::logging::{logln, logln_color, Color};
+
+use super::structs::struct_windowconfig::WindowConfig;
+
+
+pub fn start_window<F: FnOnce()>(config: WindowConfig, on_close: F) -> wry::Result<()> {
+    let mut event_loop = EventLoop::new();
+
+    let window = WindowBuilder::new()
+        .with_title(config.title)
+        .with_inner_size(LogicalSize::new(800.0, 600.0))
+        .build(&event_loop)?;
+
+    let webview = WebViewBuilder::new(window)?.with_url(&config.url)?.build()?;
+
+    logln_color("[Started: Window]", Color::Green);
+    logln(&format!("{} {}", Color::BrightBlack.paint("Window starting on URL:"), Color::Blue.paint(&config.url)));
+
+    event_loop.run_return(|event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
+            *control_flow = ControlFlow::Exit;
+        }
+    });
+
+    // Trigger the on_close callback once the window loop exits
+    logln_color("[Ended: Window]", Color::Green);
+    on_close();
+
+    // Drop the webview cleanly after returning from the event loop
+    drop(webview);
+
+    Ok(())
+}
+

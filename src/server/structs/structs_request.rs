@@ -98,6 +98,8 @@ impl Request {
                 RequestError::InvalidRequest("Invalid Content-Length value".to_string())
             })?;
 
+            logln(&format!("Content-Length: {}", content_length));
+
             let mut body = Vec::with_capacity(content_length);
             for _ in 0..content_length {
                 if let Some(&byte) = request.get(lines.clone().count()) {
