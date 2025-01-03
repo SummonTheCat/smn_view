@@ -1,0 +1,28 @@
+
+<!-- static/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Wry Static Server Example</title>
+    <script>
+        async function selectFile() {
+            const response = await fetch('/std/dialog/selectfile', { method: 'GET' });
+            const filePath = await response.text();
+            document.getElementById('file-path').innerText = filePath;
+        }
+
+        async function remapTexture() {
+            const response = await fetch('/remap_texture', { method: 'GET' });
+            const result = await response.text();
+            alert(result);
+        }
+    </script>
+</head>
+<body>
+    <h1>Texture Channel Remapper</h1>
+    <button onclick="selectFile()">Select File</button>
+    <p>Selected File: <span id="file-path">None</span></p>
+    <button onclick="remapTexture()">Remap Texture</button>
+</body>
+</html>

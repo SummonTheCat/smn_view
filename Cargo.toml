@@ -1,0 +1,11 @@
+[package]
+name = "smn_view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["SummonTheCat"]
+description = "A cross-platform web based window framework for Rust"
+
+[dependencies]
+wry = "0.19"         
+tokio = { version = "1", features = ["full"] }
