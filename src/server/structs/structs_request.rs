@@ -9,6 +9,7 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub header_fields: HashMap<String, String>, // Explicit type annotations
+    pub body: Vec<u8>, // New field to store the request body
 }
 
 /// Custom error type for Request operations.
@@ -32,13 +33,20 @@ impl std::error::Error for RequestError {}
 impl Request {
     /// Parses a raw HTTP request string and returns a `Request` instance.
     pub fn from_string(request: &str) -> Result<Self, RequestError> {
-        let mut lines = request.lines();
+        let request_bytes = request.as_bytes();
+        Self::from_bytes(request_bytes)
+    }
+
+    /// Parses a raw HTTP request from bytes and returns a `Request` instance.
+    pub fn from_bytes(request: &[u8]) -> Result<Self, RequestError> {
+        let mut lines = request.split(|&b| b == b'\r' || b == b'\n');
 
         // Parse request line
         let request_line = lines
             .next()
             .ok_or_else(|| RequestError::InvalidRequest("Empty request".to_string()))?;
-        let mut parts = request_line.split_whitespace();
+        let request_line_str = String::from_utf8_lossy(request_line);
+        let mut parts = request_line_str.split_whitespace();
 
         let method = parts
             .next()
@@ -54,21 +62,23 @@ impl Request {
         let mut header_fields: HashMap<String, String> = HashMap::new();
         let mut current_header = None;
 
-        for line in lines {
-            if line.trim().is_empty() {
+        // Parse headers
+        for line in &mut lines {
+            if line.is_empty() {
                 break; // End of headers
             }
 
-            if line.starts_with(' ') || line.starts_with('\t') {
+            let line_str = String::from_utf8_lossy(line);
+            if line_str.starts_with(' ') || line_str.starts_with('\t') {
                 // Continuation of the previous header
                 if let Some(ref header_name) = current_header {
                     if let Some(header_value) = header_fields.get_mut(header_name) {
                         header_value.push(' ');
-                        header_value.push_str(line.trim());
+                        header_value.push_str(line_str.trim());
                     }
                 }
             } else {
-                if let Some((key, value)) = line.split_once(':') {
+                if let Some((key, value)) = line_str.split_once(':') {
                     let key = key.trim().to_lowercase(); // Normalize to lowercase for case-insensitive matching
                     let value = value.trim().to_string();
                     header_fields.insert(key.clone(), value);
@@ -76,23 +86,46 @@ impl Request {
                 } else {
                     return Err(RequestError::InvalidRequest(format!(
                         "Invalid header line: {}",
-                        line
+                        line_str
                     )));
                 }
             }
         }
 
+        // Parse body based on Content-Length
+        let body = if let Some(content_length_str) = header_fields.get("content-length") {
+            let content_length: usize = content_length_str.parse().map_err(|_| {
+                RequestError::InvalidRequest("Invalid Content-Length value".to_string())
+            })?;
+
+            let mut body = Vec::with_capacity(content_length);
+            for _ in 0..content_length {
+                if let Some(&byte) = request.get(lines.clone().count()) {
+                    body.push(byte);
+                }
+            }
+
+            // Since we've already split the request into lines, we'll reconstruct the body.
+            // Alternatively, you can handle the body differently based on your server's implementation.
+            // For simplicity, we'll assume the body starts after the first empty line.
+
+            let body_start = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|pos| pos + 4)
+                .unwrap_or(request.len());
+
+            request[body_start..].to_vec()
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             method,
             path,
             header_fields,
+            body,
         })
-    }
-
-    /// Parses a raw HTTP request from bytes and returns a `Request` instance.
-    pub fn from_bytes(request: &[u8]) -> Result<Self, RequestError> {
-        let request_str = String::from_utf8_lossy(request);
-        Self::from_string(&request_str)
     }
 
     /// Retrieves the value of a specific header.
@@ -132,6 +165,25 @@ impl Request {
             .map(|value| value.as_str())
             .unwrap_or(default)
     }
+
+    /// Retrieves the request body as a byte slice.
+    ///
+    /// # Returns
+    ///
+    /// * `&[u8]` containing the request body.
+    pub fn get_body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Retrieves the request body as a string, if valid UTF-8.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(&str)` containing the body as a string.
+    /// * `Err(std::str::Utf8Error)` if the body is not valid UTF-8.
+    pub fn get_body_as_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.body)
+    }
 }
 
 // Debug implementation for Request
@@ -141,6 +193,7 @@ impl std::fmt::Debug for Request {
             .field("method", &self.method)
             .field("path", &self.path)
             .field("header_fields", &self.header_fields)
+            .field("body", &format!("{:?}", self.body))
             .finish()
     }
 }
