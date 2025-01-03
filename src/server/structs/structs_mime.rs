@@ -1,7 +1,9 @@
 pub enum Mime {
     TextPlain,
     TextHtml,
-    ApplicationJson,   
+    ApplicationJson,
+    CSS,
+    JavaScript,
 }
 
 impl Mime {
@@ -10,6 +12,8 @@ impl Mime {
             Mime::TextPlain => "text/plain",
             Mime::TextHtml => "text/html",
             Mime::ApplicationJson => "application/json",
+            Mime::CSS => "text/css",
+            Mime::JavaScript => "application/javascript",
         }
     }
 
@@ -18,6 +22,8 @@ impl Mime {
             "text/plain" => Mime::TextPlain,
             "text/html" => Mime::TextHtml,
             "application/json" => Mime::ApplicationJson,
+            "text/css" => Mime::CSS,
+            "application/javascript" => Mime::JavaScript,
             _ => Mime::TextPlain,
         }
     }
@@ -27,6 +33,8 @@ impl Mime {
             "txt" => Mime::TextPlain,
             "html" => Mime::TextHtml,
             "json" => Mime::ApplicationJson,
+            "css" => Mime::CSS,
+            "js" => Mime::JavaScript,
             _ => Mime::TextPlain,
         }
     }
